@@ -1,0 +1,29 @@
+# Generated IF signal data
+/Test.bin
+/DoublePeak.bin
+
+# MATLAB autosave and backup files
+*.asv
+*.m~
+*.autosave
+*.slx.r*
+*.mdl.r*
+
+# MATLAB compiled and generated files
+*.mex*
+*.slxc
+slprj/
+sccprj/
+codegen/
+helpsearch*/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

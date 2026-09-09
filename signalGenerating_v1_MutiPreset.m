@@ -1,0 +1,487 @@
+function signalGenerating_v111(settings)
+% Main script generating IF signals
+% Input:
+%         settings    - IF simulator settings
+%      
+% -------------------------------------------------------------------------
+%                   SoftSim: GPS IF signal simulator 
+% Author: 
+%        Yafeng Li 
+%    @ Beijing Information Science and Technology University(BISTU)
+%    2022. 08. 18
+% -------------------------------------------------------------------------
+%
+%
+%% Load trajectory ================================================
+trajectoryTime = round(settings.msToProcess)/1000 + 1; %1s用来处理trajectory边界问题，不起任何作用
+state = [1,2,3]; %状态选择，真实轨迹采用1和2，对应静止和运动，欺骗采用3-运动
+
+%真实轨迹
+s = 3*settings.SpoofingStart_Position/1000;
+StartPotion_au_XYZ = settings.StartPotion_au_XYZ ;
+[ECEFx,ECEFy,ECEFz,lat,lon,alt] = trajectorySimulation_XYZ(settings, trajectoryTime,state(2),StartPotion_au_XYZ,s); 
+% StartPotion_au = settings.StartPotion_au;
+% [ECEFx,ECEFy,ECEFz,lat,lon,alt] = trajectorySimulation(settings, trajectoryTime,state(1),StartPotion_au); 
+length_time = length(ECEFx);
+
+trajectory = zeros(length_time,6);
+for index = 1: length_time                                           
+      trajectory(index,1:6) = [lat(index), lon(index), alt(index),ECEFx(index),ECEFy(index),ECEFz(index)]; 
+end
+
+%欺骗源轨迹1 天线1
+StartPotion_sp_XYZ = settings.StartPotion_sp_XYZ;
+[ECEFx2,ECEFy2,ECEFz2,lat2,lon2,alt2] = trajectorySimulation_XYZ(settings, trajectoryTime,state(1),StartPotion_sp_XYZ,0);
+% StartPotion_sp = settings.StartPotion_sp;
+% [ECEFx2,ECEFy2,ECEFz2,lat2,lon2,alt2] = trajectorySimulation(settings, trajectoryTime,state(1),StartPotion_sp);
+trajectory2 = zeros(length_time,6);
+for index = 1: length_time                                            
+      trajectory2(index,1:6) = [lat2(index), lon2(index), alt2(index),ECEFx2(index),ECEFy2(index),ECEFz2(index)]; 
+end
+
+%欺骗虚拟轨迹
+StartPotion_sp_flase_XYZ = settings.StartPotion_sp_flase_XYZ;
+[ECEFx3,ECEFy3,ECEFz3,lat3,lon3,alt3] = trajectorySimulation_XYZ(settings, trajectoryTime,state(1),StartPotion_sp_flase_XYZ,0);
+trajectory3 = zeros(length_time,6);
+for index = 1: length_time                                            
+      trajectory3(index,1:6) = [lat3(index), lon3(index), alt3(index),ECEFx3(index),ECEFy3(index),ECEFz3(index)]; 
+end
+
+%欺骗源轨迹1  天线2
+StartPotion_sp2_XYZ = settings.StartPotion_sp2_XYZ;
+[ECEFx4,ECEFy4,ECEFz4,lat4,lon4,alt4] = trajectorySimulation_XYZ(settings, trajectoryTime,state(1),StartPotion_sp2_XYZ,0);
+trajectory4 = zeros(length_time,6);
+for index = 1: length_time                                            
+      trajectory4(index,1:6) = [lat4(index), lon4(index), alt4(index),ECEFx4(index),ECEFy4(index),ECEFz4(index)]; 
+end
+
+
+%% Read ephemeris file ============================================
+if settings.rinexVersion == 2
+    [eph,ionoutc] = rinexeV2(settings.rinexfile);    %生成星历这一步需要注意什么吗？比方说怎么生成的？格式是什么之类的
+elseif settings.rinexVersion == 3
+    [eph,ionoutc] = rinexeV3(settings.rinexfile);
+end
+
+%% Determine the visible satellite list ===========================
+% Starting time of the simulation, corresponding to the first positions 
+% in the trajectory 
+startTime = eph(1).toc;                                         
+% Initail position of the receiver trajectory
+RxPosEcef = trajectory(1,4:6);  %接收机初始位置XYZ
+RxPosEcef2 = trajectory2(1,4:6);  %接收机2初始位置XYZ
+RxPosEcef3 = trajectory3(1,4:6);  %接收机3初始位置XYZ
+RxPosEcef4 = trajectory4(1,4:6);  %接收机3初始位置XYZ
+
+% Visible satellite list (PRN#)
+[satList,elevation,azimuth] = getVisibleSat(eph,startTime,RxPosEcef',settings); %计算卫星俯仰角
+
+%% Sky plot and C/N0 seting========================================
+% figure;set(gcf,'color','w');
+% skyPlot(azimuth',elevation',satList');  %卫星天空图
+figure;set(gcf,'color','w');
+skyPlot2(azimuth',elevation',satList');  %卫星天空图
+
+% Set C/No: 1.5dB is added for compesating the cross-correlation interference
+% between diffierent PRNs
+CNoValuesdB = CNoSetting(satList,settings) + 1.5;  %CNoSetting(satList,settings)表示所有卫星的CN0设置  %+1.5后表示？
+% Covert to unite of Hz
+CNoValues = 10.^(CNoValuesdB/10);  %从dB·Hz转为Hz
+% Calculate carrier amplitude 
+carrAmp = 2 * settings.gwnAmp * sqrt(CNoValues/settings.samplingFreq);  %这一行是什么？载波幅度？
+if  settings.fileType == 2
+    carrAmp = carrAmp/sqrt(2);
+end
+%% Initialize data bits for each channle ==========================
+for svIndex = 1:length(satList)
+    PRN = satList(svIndex);
+    % Genaerate Nav message according to the ephemeris
+    navBits(svIndex).frameMsg = eph2sbf(eph(PRN),ionoutc); %#ok<*SAGROW>
+    
+    % Time to generate Nav Messages
+    navBits(svIndex).ephTime.second = startTime;
+    navBits(svIndex).ephTime.weekNrm = eph(1).weekNrm;
+    
+    % Modulate WN, TOW and CRC into Nav messages
+    navBits(svIndex).dataWord = uint32(zeros(1,60));
+    [navBits(svIndex).dataWord, navBits(svIndex).refTime] = ...
+        generateNavMsg(navBits(svIndex).frameMsg,navBits(svIndex).ephTime,1,navBits(svIndex).dataWord);
+    
+    % Extract Nav data bits from nav message
+    navBits(svIndex).dataBit = zeros(1,30*60);
+    for bitindex = 1:60
+        navBits(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+            double(bitget(navBits(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;  %???按理应该是1，0分别转化为-1，1
+%         navBits(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+%             double(bitget(navBits(svIndex).dataWord(bitindex),30:-1:1)) * (-2) + 1;  
+    end
+end
+
+
+for svIndex = 1:length(satList)
+    PRN = satList(svIndex);
+    % Genaerate Nav message according to the ephemeris
+    navBits2(svIndex).frameMsg = eph2sbf(eph(PRN),ionoutc); %#ok<*SAGROW>
+    
+    % Time to generate Nav Messages
+    navBits2(svIndex).ephTime.second = startTime;
+    navBits2(svIndex).ephTime.weekNrm = eph(1).weekNrm;
+    
+    % Modulate WN, TOW and CRC into Nav messages
+    navBits2(svIndex).dataWord = uint32(zeros(1,60));
+    [navBits2(svIndex).dataWord, navBits2(svIndex).refTime] = ...
+        generateNavMsg(navBits2(svIndex).frameMsg,navBits2(svIndex).ephTime,1,navBits2(svIndex).dataWord);
+    
+    % Extract Nav data bits from nav message
+    navBits2(svIndex).dataBit = zeros(1,30*60);
+    for bitindex = 1:60
+        navBits2(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+            double(bitget(navBits2(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;  %???按理应该是1，0分别转化为-1，1
+    end
+end
+
+for svIndex = 1:length(satList)
+    PRN = satList(svIndex);
+    % Genaerate Nav message according to the ephemeris
+    navBits4(svIndex).frameMsg = eph2sbf(eph(PRN),ionoutc); %#ok<*SAGROW>
+    
+    % Time to generate Nav Messages
+    navBits4(svIndex).ephTime.second = startTime;
+    navBits4(svIndex).ephTime.weekNrm = eph(1).weekNrm;
+    
+    % Modulate WN, TOW and CRC into Nav messages
+    navBits4(svIndex).dataWord = uint32(zeros(1,60));
+    [navBits4(svIndex).dataWord, navBits4(svIndex).refTime] = ...
+        generateNavMsg(navBits4(svIndex).frameMsg,navBits4(svIndex).ephTime,1,navBits4(svIndex).dataWord);
+    
+    % Extract Nav data bits from nav message
+    navBits4(svIndex).dataBit = zeros(1,30*60);
+    for bitindex = 1:60
+        navBits4(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+            double(bitget(navBits4(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;  %???按理应该是1，0分别转化为-1，1
+    end
+end
+
+%% Generate C/A code table
+% Get a vector with the C/A code sampled 1x/chip
+for svIndex = 1:length(satList)
+    PRN = satList(svIndex);
+    caCode = generateCAcode(PRN);
+    caCodeTable(svIndex,:) = [caCode(end) caCode caCode(1)];
+%     caCodeTable_sp(svIndex,:) = [caCode(end) caCode(1) caCode(end) caCode(1:(length(caCode)-1)) ];
+end
+
+%% Allocate variables and spaces ==================================
+% Sample counts within each transmitting time calculation step (1 ms) 
+blockSize = round(settings.samplingFreq * 0.001);
+% Time interval for each transmitting time calculation step (the calculation
+% step may not be exactly the same as 1 ms). The time interval of position
+% samples in trajectory must equal blockTime.
+blockTime = blockSize/settings.samplingFreq;
+% Iteration count   锛堟瘡娆″惊鐜?ms銆傚垎鍓叉垚10涓彂灏勬椂闂磋绠楃偣锛?
+iterCnt = round(settings.msToProcess/1000/blockTime);
+
+% 欺骗加入时刻开关
+spoofingEnable = zeros(1,iterCnt);
+spoofingEnable(settings.SpoofingStart_Position+1:end) = 1;
+
+% Initialize Rx Time and Rx postions 
+RxTime(1) = startTime;
+RxTime(2) = RxTime(1) + blockTime;
+RxPosEcef(1:2,:)  = trajectory(1:2,4:6);
+
+RxTime2(1) = startTime;
+RxTime2(2) = RxTime2(1) + blockTime;
+RxPosEcef2(1:2,:)  = trajectory2(1:2,4:6);
+
+% RxTime3(1) = startTime;
+% RxTime3(2) = RxTime3(1) + blockTime;
+RxPosEcef3(1:2,:)  = trajectory3(1:2,4:6);
+
+RxTime4(1) = startTime;
+RxTime4(2) = RxTime4(1) + blockTime;
+RxPosEcef4(1:2,:)  = trajectory4(1:2,4:6);
+
+% Local oscilator frequency in rad
+localOsFreq = (settings.carrFreqBasis - settings.IF) * 2 * pi;
+% RF signal freq in rad
+carrFreqRad = settings.carrFreqBasis * 2 * pi;
+% Nav bit period
+bitPeriod = 0.001 * 20;
+% Front end filter coeffficient
+coef = getFliterCoef(settings);
+% Open the IF file to save senerated samples 
+[fid, ~] = fopen(settings.IfFile, 'w');
+
+% Start waitbar
+hwb = waitbar(0,'IF signal generating ...');
+barTimeMs  = round(iterCnt * blockTime * 1000); % [ms]
+
+
+%% Generate IF siganl =============================================
+disp('IF signal generating is undergoing, please wait ...')
+for loopCnt =  1:iterCnt
+
+    if spoofingEnable(loopCnt) ==1
+       Delay = zeros(1,length(satList)); 
+       
+%        Delay(1:2) = Delay(1:2) + 200; 
+%        Delay(3:4) = Delay(3:4) + 150; 
+
+%        Delay(1:4) = Delay(1:4) + 50; 
+%        Delay(1:4) = Delay(1:4) + 100; 
+%        Delay(1:4) = Delay(1:4) + 200; 
+       
+
+% %        Delay(1:5) = Delay(1:5); 
+%        Delay(6:10) = Delay(6:10) + 100; 
+       
+%          Delay(1:5) = Delay(1:5) + 100; 
+%          Delay(6:10) = Delay(6:10) + 200;
+
+%        Delay = Delay + 50; 
+%        Delay = Delay + 100; 
+%        Delay = Delay + 150; 
+    else
+       Delay = zeros(1,length(satList));  
+    end
+    
+    % wait bar ------------------------------------------------------------
+    if (rem(loopCnt, 10) == 0)
+%         Ln = newline;
+        processStatus = ['Generating: ', int2str(loopCnt), ...
+            ' ms ', ' of ', int2str(barTimeMs), ' msec'];
+        try
+            waitbar(loopCnt/barTimeMs,hwb,processStatus);
+        catch
+            % The progress bar was closed. It is used as a signal
+            % to stop, "cancel" processing. Exit.
+            disp('Progress bar closed, exiting...');
+            return
+        end
+    end
+
+    % Sum of loacal signals of all visible satellites
+    if settings.fileType == 1
+        localSigSum = zeros(1,blockSize); % samples of 1ms length
+    elseif settings.fileType == 2
+        localSigSum = complex(zeros(1,blockSize));
+    end
+      
+    for svIndex = 1:length(satList)
+        
+        % Compute the transmitting time coresponding to the Rx time -------
+        PRN = satList(svIndex);
+        delay = Delay(svIndex);
+        [TxTime,satClkErr] = GetTravelTime(RxTime,RxPosEcef,eph(PRN),settings);
+%         [TxTime2,satClkErr2] = GetTravelTime(RxTime2,RxPosEcef2,eph(PRN),settings);
+%         [TxTime2,satClkErr2] = GetTravelTime_deltaT(RxTime2,RxPosEcef2,eph(PRN),settings,RxPosEcef,delay);
+        [TxTime2,satClkErr2] = GetTravelTime_deltaT2(RxTime2,RxPosEcef2,eph(PRN),settings,RxPosEcef,RxPosEcef3,delay);
+        [TxTime4,satClkErr4] = GetTravelTime_deltaT2(RxTime4,RxPosEcef4,eph(PRN),settings,RxPosEcef,RxPosEcef3,delay);
+
+        % include tgd, clock error and relativistic effect 
+        TxTime = TxTime + satClkErr;
+        TxTime2 = TxTime2 + satClkErr2;
+        TxTime4 = TxTime4 + satClkErr4;
+        
+        % generate local code, carrier and Nav data -----------------------
+        sapcing = (TxTime(2) - TxTime(1))/blockSize;
+        TxTimeSample = linspace(TxTime(1),TxTime(2) - sapcing,blockSize);
+        sapcing = (RxTime(2) - RxTime(1))/blockSize;
+        RxTimeSample = linspace(RxTime(1),RxTime(2) - sapcing,blockSize);
+        
+        spacing2 = (TxTime2(2) - TxTime2(1))/blockSize;
+        TxTimeSample2 = linspace(TxTime2(1),TxTime2(2) - spacing2,blockSize);
+        spacing2 = (RxTime2(2) - RxTime2(1))/blockSize;
+        RxTimeSample2 = linspace(RxTime2(1),RxTime2(2) - spacing2,blockSize);
+        
+        spacing4 = (TxTime4(2) - TxTime4(1))/blockSize;
+        TxTimeSample4 = linspace(TxTime4(1),TxTime4(2) - spacing4,blockSize);
+        spacing4 = (RxTime4(2) - RxTime4(1))/blockSize;
+        RxTimeSample4 = linspace(RxTime4(1),RxTime4(2) - spacing4,blockSize);
+        
+        % local carrier samples
+        if  settings.fileType == 1
+            localCarr = cos(carrFreqRad * TxTimeSample - localOsFreq * RxTimeSample);
+            localCarr2 = cos(carrFreqRad * TxTimeSample2 - localOsFreq * RxTimeSample2);
+            localCarr4 = cos(carrFreqRad * TxTimeSample4 - localOsFreq * RxTimeSample4);
+        elseif settings.fileType == 2
+            localCarr = exp(-1i*(carrFreqRad * TxTimeSample - localOsFreq * RxTimeSample));
+            localCarr2 = exp(-1i*(carrFreqRad * TxTimeSample2 - localOsFreq * RxTimeSample2));
+            localCarr4 = cos(carrFreqRad * TxTimeSample4 - localOsFreq * RxTimeSample4);
+        end
+        
+        % Local code samples
+        codePhase = TxTimeSample * settings.codeFreqBasis;
+        codeIndex = ceil(rem(codePhase,settings.codeLength)) + 1;
+        localCode = caCodeTable(svIndex,codeIndex);
+        
+        codePhase2 = TxTimeSample2 * settings.codeFreqBasis;
+        codeIndex2 = ceil(rem(codePhase2,settings.codeLength)) + 1;
+        localCode2 = caCodeTable(svIndex,codeIndex2);
+        
+        codePhase4 = TxTimeSample4 * settings.codeFreqBasis;
+        codeIndex4 = ceil(rem(codePhase4,settings.codeLength)) + 1;
+        localCode4 = caCodeTable(svIndex,codeIndex4);
+        
+        % Nav bit samples
+        dataTime = TxTimeSample - (navBits(svIndex).refTime - 6);
+        bitPhase = ceil(dataTime/bitPeriod);
+        localDataBit = navBits(svIndex).dataBit(bitPhase);
+        
+        dataTime2 = TxTimeSample2 - (navBits2(svIndex).refTime - 6);
+        bitPhase2 = ceil(dataTime2/bitPeriod);
+        localDataBit2 = navBits2(svIndex).dataBit(bitPhase2);
+        
+        dataTime4 = TxTimeSample4 - (navBits4(svIndex).refTime - 6);
+        bitPhase4 = ceil(dataTime4/bitPeriod);
+        localDataBit4 = navBits4(svIndex).dataBit(bitPhase4);
+        
+        % Update Nav date bits --------------------------------------------
+        if (TxTime(end) + 1) > (navBits(svIndex).refTime + 30)
+            % Time to generate Nav Messages
+            navBits(svIndex).ephTime.second = navBits(svIndex).refTime + 30.5;
+                        
+            % Modulate WN, TOW and CRC into Nav messages
+            [navBits(svIndex).dataWord, navBits(svIndex).refTime] = ...
+                generateNavMsg(navBits(svIndex).frameMsg,navBits(svIndex).ephTime, ...
+                0,navBits(svIndex).dataWord);
+            
+            % Extract Nav data bits from nav message
+            for bitindex = 1:60
+                navBits(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+                double(bitget(navBits(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;
+            end
+        end
+        
+        if (TxTime2(end) + 1) > (navBits2(svIndex).refTime + 30)
+            % Time to generate Nav Messages
+            navBits2(svIndex).ephTime.second = navBits2(svIndex).refTime + 30.5;
+                        
+            % Modulate WN, TOW and CRC into Nav messages
+            [navBits2(svIndex).dataWord, navBits2(svIndex).refTime] = ...
+                generateNavMsg(navBits2(svIndex).frameMsg,navBits2(svIndex).ephTime, ...
+                0,navBits2(svIndex).dataWord);
+            
+            % Extract Nav data bits from nav message
+            for bitindex = 1:60
+                navBits2(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+                double(bitget(navBits2(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;
+            end
+        end
+        
+        if (TxTime4(end) + 1) > (navBits4(svIndex).refTime + 30)
+            % Time to generate Nav Messages
+            navBits4(svIndex).ephTime.second = navBits4(svIndex).refTime + 30.5;
+                        
+            % Modulate WN, TOW and CRC into Nav messages
+            [navBits4(svIndex).dataWord, navBits4(svIndex).refTime] = ...
+                generateNavMsg(navBits4(svIndex).frameMsg,navBits4(svIndex).ephTime, ...
+                0,navBits4(svIndex).dataWord);
+            
+            % Extract Nav data bits from nav message
+            for bitindex = 1:60
+                navBits4(svIndex).dataBit((bitindex-1) * 30 + 1 : bitindex * 30) = ...
+                double(bitget(navBits4(svIndex).dataWord(bitindex),30:-1:1)) * 2 - 1;
+            end
+        end
+            
+        
+        ampFactor = 10^(settings.powerIncreaseFactor/20); % x dBm power increase
+         
+%      %%   单天线半通道
+%         Indicator_au = [0,0,0,0,1,1,1,1,1,1]; 
+%         Indicator_sp = 1-Indicator_au;%分别是PRN2、PRN3、PRN6和PRN9
+%         
+% %         localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex)*Indicator_au(svIndex) ;%用于开关式欺骗
+%         localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex);
+%         localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp(svIndex) ;
+%        
+%         localSigSum = localSigSum + localSig +localSig2;
+        
+%      %% 单天线全通道
+%         localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex) * (1 - spoofingEnable(loopCnt));
+%         localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable * spoofingEnable(loopCnt);
+%         localSig4 = (localCode4 .* localDataBit4 .* localCarr4) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable * spoofingEnable(loopCnt);
+%         
+%         localSigSum = localSigSum + localSig +localSig2 + localSig4;
+
+     %%   多天线半通道
+
+        Indicator_sp1 = [1,1,1,0,0,0,0,0,0,0];%分别是PRN2、PRN3
+        Indicator_sp2 = [0,0,0,1,1,1,0,0,0,0];%分别是PRN6、PRN9
+        
+        localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex);
+        localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp1(svIndex) ;
+        localSig4 = (localCode4 .* localDataBit4 .* localCarr4) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp2(svIndex) ;
+       
+        localSigSum = localSigSum + localSig +localSig2 + localSig4;
+        
+     %% 多天线全通道
+%         Indicator_sp1 = [1,1,1,1,1,0,0,0,0,0];%分别是PRN2、PRN3、PRN6、PRN9和PRN10
+%         Indicator_sp2 = [0,0,0,0,0,1,1,1,1,1];%分别是PRN6、PRN9
+%         
+%         localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex);
+%         localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp1(svIndex) ;
+%         localSig4 = (localCode4 .* localDataBit4 .* localCarr4) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp2(svIndex) ;
+%        
+%         localSigSum = localSigSum + localSig +localSig2 + localSig4;
+       
+    end % svIndex = 1:length(satList)
+    
+    % Update Rx time and receiver position --------------------------------
+    RxTime(1) = RxTime(2);
+    RxTime(2) = RxTime(2) + blockTime;
+    % Corresponding receiver positions 
+    RxPosEcef(1,:)  = RxPosEcef(2,:);
+    RxPosEcef(2,:)  = trajectory(loopCnt + 1,4:6);
+    
+    RxTime2(1) = RxTime2(2);
+    RxTime2(2) = RxTime2(2) + blockTime;
+    RxPosEcef2(1,:)  = RxPosEcef2(2,:);
+    RxPosEcef2(2,:)  = trajectory2(loopCnt + 1,4:6);
+    
+    RxPosEcef3(1,:)  = RxPosEcef3(2,:);
+    RxPosEcef3(2,:)  = trajectory3(loopCnt + 1,4:6);
+    
+    RxTime4(1) = RxTime4(2);
+    RxTime4(2) = RxTime4(2) + blockTime;
+    RxPosEcef4(1,:)  = RxPosEcef4(2,:);
+    RxPosEcef4(2,:)  = trajectory4(loopCnt + 1,4:6);
+    
+    % Add nosie and filter ------------------------------------------------
+    if settings.filterEn == 1
+        % Generate WGN
+        if  settings.fileType == 1
+            gwnSamlple = wgn(1,blockSize,settings.gwnAmp^2,'linear');
+        elseif settings.fileType == 2
+            gwnSamlple = wgn(1,blockSize,settings.gwnAmp^2,'linear')...
+                + 1i*wgn(1,blockSize,settings.gwnAmp^2,'linear');
+        end
+        % Add WGN
+        localSigSum = localSigSum + gwnSamlple;
+        % Do FE filtering 
+        localSigSum = filter(coef,1,localSigSum);
+    end
+    
+    % ADC quantization ----------------------------------------------------
+    if strcmp(settings.dataType,'int8')
+        localSigSum = localSigSum/max(real(localSigSum)) * 2^7;
+        quantizedSig = int8(localSigSum);
+        fwrite(fid,quantizedSig,settings.dataType);
+    elseif strcmp(settings.dataType,'int16')
+        localSigSum = localSigSum/max(real(localSigSum)) * 2^12;
+        quantizedSig = int16(localSigSum); 
+        fwrite(fid,quantizedSig,settings.dataType);
+    end
+    
+    if settings.fileType == 2 
+        quantizedSig1 = reshape([real(quantizedSig);imag(quantizedSig)],[],1);
+        fwrite(fid,quantizedSig1,settings.dataType);
+    end
+    
+end
+%% clear environment
+fclose(fid);
+close(hwb) 
+
