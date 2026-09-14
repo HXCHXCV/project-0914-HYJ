@@ -49,12 +49,15 @@ if settings.rinexVersion == 2
 elseif settings.rinexVersion == 3
     [eph,ionoutc] = rinexeV3(settings.rinexfile);
 end
+ephRaw = eph;
 
 %% Determine the visible satellite list ===========================
 % Starting time of the simulation, corresponding to the first positions 
 % in the trajectory 
 % startTime = eph(1).toc;       
 startTime = eph(1).toc + 14*60*60;    %14点的PRN  1、3、6、7、13、16、18、21、28、31。
+
+eph = selectEphemerisByPrn_GPS(ephRaw,startTime);
 
 % Initail position of the receiver trajectory
 RxPosEcef = trajectory(1,4:6);  %接收机初始位置XYZ
@@ -148,6 +151,37 @@ blockTime = blockSize/settings.samplingFreq;
 % Iteration count   锛堟瘡娆″惊鐜?ms銆傚垎鍓叉垚10涓彂灏勬椂闂磋绠楃偣锛?
 iterCnt = round(settings.msToProcess/1000/blockTime);
 
+% Initialize the two complete RINEX OBS streams. Their epoch selection is
+% independent of spoofingEnable; both streams start at the first block.
+obsEnable = isfield(settings,'obsEnable') && logical(settings.obsEnable);
+if obsEnable
+    if ~isscalar(settings.obsInterval) || ~isfinite(settings.obsInterval) || ...
+            settings.obsInterval <= 0
+        error('settings.obsInterval must be a positive finite scalar.');
+    end
+
+    obsStep = round(settings.obsInterval/blockTime);
+    if obsStep < 1 || abs(obsStep*blockTime - settings.obsInterval) > 1e-12
+        error('settings.obsInterval must be an integer multiple of blockTime (%.12g s).', blockTime);
+    end
+
+    obsEpochCount = floor((iterCnt - 1)/obsStep) + 1;
+    emptyObsEpoch = struct('week',[],'sow',[],'RxPos',[],'sat',[], ...
+        'C1C',[],'L1C',[],'D1C',[],'S1C',[]);
+    directObsEpochs = repmat(emptyObsEpoch, 1, obsEpochCount);
+    virtualObsEpochs = repmat(emptyObsEpoch, 1, obsEpochCount);
+    obsCnt = 0;
+
+    obsSat = cell(length(satList),1);
+    for svIndex = 1:length(satList)
+        obsSat{svIndex} = sprintf('G%02d', satList(svIndex));
+    end
+
+    % Fixed integer ambiguity per PRN, shared by Direct and Virtual. This
+    % deterministic initialization does not alter the IF noise RNG state.
+    obsAmbiguityCycles = -16500 + 1000*(1:32);
+end
+
 % 欺骗加入时刻开关
 spoofingEnable = zeros(1,iterCnt);
 spoofingEnable(settings.SpoofingStart_Position+1:end) = 1;
@@ -185,6 +219,18 @@ barTimeMs  = round(iterCnt * blockTime * 1000); % [ms]
 disp('IF signal generating is undergoing, please wait ...')
 for loopCnt =  1:iterCnt
 
+    isObsEpoch = obsEnable && (mod(loopCnt - 1, obsStep) == 0);
+    if isObsEpoch
+        directC1C = zeros(length(satList),1);
+        directL1C = zeros(length(satList),1);
+        directD1C = zeros(length(satList),1);
+        directS1C = zeros(length(satList),1);
+        virtualC1C = zeros(length(satList),1);
+        virtualL1C = zeros(length(satList),1);
+        virtualD1C = zeros(length(satList),1);
+        virtualS1C = zeros(length(satList),1);
+    end
+
     if spoofingEnable(loopCnt) ==1
        Delay = zeros(1,length(satList)); 
        Delay = Delay + 0;       
@@ -221,12 +267,21 @@ for loopCnt =  1:iterCnt
         delay = Delay(svIndex);
         
         %迭代发射时
-        [TxTime,satClkErr] = GetTravelTime(RxTime,RxPosEcef,eph(PRN),settings);  %真实轨迹
-        [TxTime2,satClkErr2] = GetTravelTime_deltaT2(RxTime2,RxPosEcef2,eph(PRN),settings,RxPosEcef,RxPosEcef3,delay); %欺骗虚拟---带转发
+        [TxTime,satClkErr,travelTime] = GetTravelTime(RxTime,RxPosEcef,eph(PRN),settings);  %真实轨迹
+        [TxTime2,satClkErr2,travelTime2] = GetTravelTime_deltaT2(RxTime2,RxPosEcef2,eph(PRN),settings,RxPosEcef,RxPosEcef3,delay); %欺骗虚拟---带转发
 
         % include tgd, clock error and relativistic effect 
         TxTime = TxTime + satClkErr;
         TxTime2 = TxTime2 + satClkErr2;
+
+        if isObsEpoch
+            [directC1C(svIndex),directL1C(svIndex),directD1C(svIndex),directS1C(svIndex)] = ...
+                calcObsFromTxTime_GPSL1CA(RxTime,TxTime,travelTime,satClkErr, ...
+                obsAmbiguityCycles(PRN),CNoValuesdB(svIndex),settings);
+            [virtualC1C(svIndex),virtualL1C(svIndex),virtualD1C(svIndex),virtualS1C(svIndex)] = ...
+                calcObsFromTxTime_GPSL1CA(RxTime2,TxTime2,travelTime2,satClkErr2, ...
+                obsAmbiguityCycles(PRN),CNoValuesdB(svIndex),settings);
+        end
         
         % generate local code, carrier and Nav data -----------------------
         sapcing = (TxTime(2) - TxTime(1))/blockSize;
@@ -315,6 +370,29 @@ for loopCnt =  1:iterCnt
         localSigSum = localSigSum + localSig +localSig2;
        
     end % svIndex = 1:length(satList)
+
+    if isObsEpoch
+        obsCnt = obsCnt + 1;
+        obsSow = startTime + (loopCnt - 1)*blockTime;
+
+        directObsEpochs(obsCnt).week = eph(1).weekNrm;
+        directObsEpochs(obsCnt).sow = obsSow;
+        directObsEpochs(obsCnt).RxPos = RxPosEcef(1,:);
+        directObsEpochs(obsCnt).sat = obsSat;
+        directObsEpochs(obsCnt).C1C = directC1C;
+        directObsEpochs(obsCnt).L1C = directL1C;
+        directObsEpochs(obsCnt).D1C = directD1C;
+        directObsEpochs(obsCnt).S1C = directS1C;
+
+        virtualObsEpochs(obsCnt).week = eph(1).weekNrm;
+        virtualObsEpochs(obsCnt).sow = obsSow;
+        virtualObsEpochs(obsCnt).RxPos = RxPosEcef(1,:);
+        virtualObsEpochs(obsCnt).sat = obsSat;
+        virtualObsEpochs(obsCnt).C1C = virtualC1C;
+        virtualObsEpochs(obsCnt).L1C = virtualL1C;
+        virtualObsEpochs(obsCnt).D1C = virtualD1C;
+        virtualObsEpochs(obsCnt).S1C = virtualS1C;
+    end
     
     % Update Rx time and receiver position --------------------------------
     RxTime(1) = RxTime(2);
@@ -362,6 +440,29 @@ for loopCnt =  1:iterCnt
         fwrite(fid,quantizedSig1,settings.dataType);
     end
     
+end
+
+if obsEnable
+    meta.markerName = settings.markerName;
+    meta.markerNumber = settings.markerNumber;
+    meta.observer = settings.observerAgency;
+    meta.agency = '';
+    meta.receiverNumber = '';
+    meta.receiverType = settings.receiverType;
+    meta.receiverVersion = '';
+    meta.antennaNumber = '';
+    meta.antennaType = settings.antennaType;
+    meta.interval = settings.obsInterval;
+    meta.leapSeconds = ionoutc.dtls;
+    meta.timeSystem = 'GPS';
+    meta.approxPosXYZ = trajectory(1,4:6);
+    meta.antDeltaHEN = settings.antDeltaHEN;
+    meta.rcvClockOffsAppl = 0;
+
+    writeRinex302Obs_GPS_L1CA(settings.directObsFile,meta,directObsEpochs);
+    writeRinex302Obs_GPS_L1CA(settings.virtualObsFile,meta,virtualObsEpochs);
+    fprintf('RINEX OBS exported: %s and %s (epochs=%d)\n', ...
+        settings.directObsFile,settings.virtualObsFile,obsCnt);
 end
 %% clear environment
 fclose(fid);

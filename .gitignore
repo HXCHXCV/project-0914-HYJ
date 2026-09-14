@@ -1,6 +1,7 @@
 # Generated IF signal data
 /Test.bin
 /DoublePeak.bin
+/Test_OBS_validation.bin
 
 # MATLAB autosave and backup files
 *.asv

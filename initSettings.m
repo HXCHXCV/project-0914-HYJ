@@ -19,6 +19,19 @@ settings.rinexfile           = 'brdc3140_251110.25n';
 
 settings.IfFile             = 'Test.bin';
 
+% RINEX 3.02 OBS export (GPS L1 C/A)
+settings.obsEnable          = 1;
+settings.obsInterval        = 1.0;       % 0.001 or 1.0 [s]
+settings.directObsFile      = 'Direct.obs';
+settings.virtualObsFile     = 'Virtual.obs';
+
+settings.markerName         = 'SIM';
+settings.markerNumber       = '0000';
+settings.observerAgency     = 'SoftSim';
+settings.receiverType       = 'SIM-RX';
+settings.antennaType        = 'SIM-ANT';
+settings.antDeltaHEN        = [0 0 0];
+
 
 % Data type used to store one sample
 settings.dataType           = 'int8';  

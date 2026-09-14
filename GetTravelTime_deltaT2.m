@@ -1,7 +1,8 @@
-function [TxTime,satClkErr] = GetTravelTime_deltaT2(RxTime,RxPos,eph,settings,RxPos1,RxPos3,delay)
+function [TxTime,satClkErr,travelTime] = GetTravelTime_deltaT2(RxTime,RxPos,eph,settings,RxPos1,RxPos3,delay)
 % Get signal transmitting time and travel time.
 %
-%[Txtime,travelTime] = GetTravelTime(RxTime,RxPosEcef,eph,settings)
+%[TxTime,satClkErr,travelTime] = GetTravelTime_deltaT2( ...
+%    RxTime,RxPosEcef,eph,settings,RxPos1,RxPos3,delay)
 %
 %   Inputs:
 %       RxTime            - Signal receiving time.
@@ -9,8 +10,9 @@ function [TxTime,satClkErr] = GetTravelTime_deltaT2(RxTime,RxPos,eph,settings,Rx
 %       eph               - Ephemeris.
 %       settings          - simulator settings.
 %   Outputs:
-%       Txtime            - Signal transmitting time.
-%       travelTime        - Signal travel time.
+%       TxTime            - Signal transmitting time.
+%       satClkErr         - Satellite clock correction.
+%       travelTime        - Signal travel time (optional third output).
 %--------------------------------------------------------------------------
 %
 %              SoftSim: GPS IF signal simulator 
