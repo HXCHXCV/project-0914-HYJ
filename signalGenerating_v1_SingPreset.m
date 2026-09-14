@@ -73,16 +73,24 @@ if ~isscalar(settings.SpoofingChannelMode) || ...
     error('settings.SpoofingChannelMode must be 1 (full) or 2 (partial).');
 end
 
-if ~isscalar(settings.PartialSpoofingChannelCount) || ...
-        ~isfinite(settings.PartialSpoofingChannelCount) || ...
-        settings.PartialSpoofingChannelCount < 0 || ...
-        settings.PartialSpoofingChannelCount ~= round(settings.PartialSpoofingChannelCount)
-    error('settings.PartialSpoofingChannelCount must be a nonnegative integer.');
-end
+if settings.SpoofingChannelMode == 2
+    if ~isfield(settings,'PartialSpoofingMask') || ...
+            ~(isnumeric(settings.PartialSpoofingMask) || islogical(settings.PartialSpoofingMask)) || ...
+            ~isvector(settings.PartialSpoofingMask)
+        error('settings.PartialSpoofingMask must be a numeric or logical vector.');
+    end
 
-Indicator_sp = zeros(1,length(satList));
-partialChannelCount = min(settings.PartialSpoofingChannelCount,length(satList));
-Indicator_sp(1:partialChannelCount) = 1;
+    mask = settings.PartialSpoofingMask(:).';
+    if any(~isfinite(mask)) || any((mask ~= 0) & (mask ~= 1))
+        error('settings.PartialSpoofingMask must contain only 0 or 1.');
+    end
+
+    Indicator_sp = zeros(1,length(satList));
+    copyCount = min(numel(mask),length(satList));
+    Indicator_sp(1:copyCount) = mask(1:copyCount);
+else
+    Indicator_sp = zeros(1,length(satList));
+end
 
 % [~,elevation2,azimuth2] = getVisibleSat(eph,startTime+1,RxPosEcef',settings); %计算卫星俯仰角2
 %% Sky plot and C/N0 seting========================================
