@@ -66,6 +66,24 @@ RxPosEcef3 = trajectory3(1,4:6);  %虚拟轨迹初始位置XYZ
 
 % Visible satellite list (PRN#)
 [satList,elevation,azimuth] = getVisibleSat(eph,startTime,RxPosEcef',settings); %计算卫星俯仰角1
+
+% Channel selection for full / partial position spoofing
+if ~isscalar(settings.SpoofingChannelMode) || ...
+        ~ismember(settings.SpoofingChannelMode,[1 2])
+    error('settings.SpoofingChannelMode must be 1 (full) or 2 (partial).');
+end
+
+if ~isscalar(settings.PartialSpoofingChannelCount) || ...
+        ~isfinite(settings.PartialSpoofingChannelCount) || ...
+        settings.PartialSpoofingChannelCount < 0 || ...
+        settings.PartialSpoofingChannelCount ~= round(settings.PartialSpoofingChannelCount)
+    error('settings.PartialSpoofingChannelCount must be a nonnegative integer.');
+end
+
+Indicator_sp = zeros(1,length(satList));
+partialChannelCount = min(settings.PartialSpoofingChannelCount,length(satList));
+Indicator_sp(1:partialChannelCount) = 1;
+
 % [~,elevation2,azimuth2] = getVisibleSat(eph,startTime+1,RxPosEcef',settings); %计算卫星俯仰角2
 %% Sky plot and C/N0 seting========================================
 figure;set(gcf,'color','w');
@@ -75,6 +93,7 @@ skyPlot(azimuth',elevation',satList');  %卫星天空图
 % Set C/No: 1.5dB is added for compesating the cross-correlation interference
 % between diffierent PRNs
 CNoValuesdB = CNoSetting(satList,settings) + 1.5;  %CNoSetting(satList,settings)表示所有卫星的CN0设置  %+1.5后表示？
+virtualCNoValuesdB = CNoValuesdB + settings.powerIncreaseFactor;
 % Covert to unite of Hz
 CNoValues = 10.^(CNoValuesdB/10);  %从dB·Hz转为Hz
 % Calculate carrier amplitude 
@@ -151,8 +170,7 @@ blockTime = blockSize/settings.samplingFreq;
 % Iteration count   锛堟瘡娆″惊鐜?ms銆傚垎鍓叉垚10涓彂灏勬椂闂磋绠楃偣锛?
 iterCnt = round(settings.msToProcess/1000/blockTime);
 
-% Initialize the two complete RINEX OBS streams. Their epoch selection is
-% independent of spoofingEnable; both streams start at the first block.
+% Initialize RINEX OBS streams.
 obsEnable = isfield(settings,'obsEnable') && logical(settings.obsEnable);
 if obsEnable
     if ~isscalar(settings.obsInterval) || ~isfinite(settings.obsInterval) || ...
@@ -168,17 +186,23 @@ if obsEnable
     obsEpochCount = floor((iterCnt - 1)/obsStep) + 1;
     emptyObsEpoch = struct('week',[],'sow',[],'RxPos',[],'sat',[], ...
         'C1C',[],'L1C',[],'D1C',[],'S1C',[]);
-    directObsEpochs = repmat(emptyObsEpoch, 1, obsEpochCount);
-    virtualObsEpochs = repmat(emptyObsEpoch, 1, obsEpochCount);
+
+    directObsEpochs = repmat(emptyObsEpoch,1,obsEpochCount);
+
+    if settings.SpoofingChannelMode == 1
+        virtualObsEpochs = repmat(emptyObsEpoch,1,obsEpochCount);
+    else
+        partialSpoofObsEpochs = repmat(emptyObsEpoch,1,obsEpochCount);
+    end
+
     obsCnt = 0;
 
     obsSat = cell(length(satList),1);
     for svIndex = 1:length(satList)
-        obsSat{svIndex} = sprintf('G%02d', satList(svIndex));
+        obsSat{svIndex} = sprintf('G%02d',satList(svIndex));
     end
 
-    % Fixed integer ambiguity per PRN, shared by Direct and Virtual. This
-    % deterministic initialization does not alter the IF noise RNG state.
+    % Fixed integer ambiguity per PRN, shared by Direct and Virtual.
     obsAmbiguityCycles = -16500 + 1000*(1:32);
 end
 
@@ -280,7 +304,7 @@ for loopCnt =  1:iterCnt
                 obsAmbiguityCycles(PRN),CNoValuesdB(svIndex),settings);
             [virtualC1C(svIndex),virtualL1C(svIndex),virtualD1C(svIndex),virtualS1C(svIndex)] = ...
                 calcObsFromTxTime_GPSL1CA(RxTime2,TxTime2,travelTime2,satClkErr2, ...
-                obsAmbiguityCycles(PRN),CNoValuesdB(svIndex),settings);
+                obsAmbiguityCycles(PRN),virtualCNoValuesdB(svIndex),settings);
         end
         
         % generate local code, carrier and Nav data -----------------------
@@ -355,19 +379,26 @@ for loopCnt =  1:iterCnt
         end
 
         ampFactor = 10^(settings.powerIncreaseFactor/20); % 欺骗功率因子
-         
-     %%   半通道
-%         Indicator_sp = [1,1,1,1,0,0,0,0,0,0]; %前四个分别是PRN1、PRN3、PRN6和PRN7
-%         localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex);
-%         localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable* spoofingEnable(loopCnt)*Indicator_sp(svIndex) ;
-% 
-%         localSigSum = localSigSum + localSig +localSig2;
-%         
-     %% 全通道
-        localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex) * (1 - spoofingEnable(loopCnt));
-        localSig2 = (localCode2 .* localDataBit2 .* localCarr2) * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable * spoofingEnable(loopCnt);
-        
-        localSigSum = localSigSum + localSig +localSig2;
+
+        if settings.SpoofingChannelMode == 2
+            % Partial-channel spoofing: preserve the original partial-channel model.
+            localSig = (localCode .* localDataBit .* localCarr) * carrAmp(svIndex);
+            localSig2 = (localCode2 .* localDataBit2 .* localCarr2) ...
+                * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable ...
+                * spoofingEnable(loopCnt) * Indicator_sp(svIndex);
+
+            localSigSum = localSigSum + localSig + localSig2;
+
+        elseif settings.SpoofingChannelMode == 1
+            % Full-channel spoofing: preserve the original full-channel model.
+            localSig = (localCode .* localDataBit .* localCarr) ...
+                * carrAmp(svIndex) * (1 - spoofingEnable(loopCnt));
+            localSig2 = (localCode2 .* localDataBit2 .* localCarr2) ...
+                * carrAmp(svIndex) * ampFactor * settings.SpoofingEnable ...
+                * spoofingEnable(loopCnt);
+
+            localSigSum = localSigSum + localSig + localSig2;
+        end
        
     end % svIndex = 1:length(satList)
 
@@ -384,14 +415,45 @@ for loopCnt =  1:iterCnt
         directObsEpochs(obsCnt).D1C = directD1C;
         directObsEpochs(obsCnt).S1C = directS1C;
 
-        virtualObsEpochs(obsCnt).week = eph(1).weekNrm;
-        virtualObsEpochs(obsCnt).sow = obsSow;
-        virtualObsEpochs(obsCnt).RxPos = RxPosEcef(1,:);
-        virtualObsEpochs(obsCnt).sat = obsSat;
-        virtualObsEpochs(obsCnt).C1C = virtualC1C;
-        virtualObsEpochs(obsCnt).L1C = virtualL1C;
-        virtualObsEpochs(obsCnt).D1C = virtualD1C;
-        virtualObsEpochs(obsCnt).S1C = virtualS1C;
+        if settings.SpoofingChannelMode == 1
+            % Full mode: keep the complete Virtual reference stream.
+            virtualObsEpochs(obsCnt).week = eph(1).weekNrm;
+            virtualObsEpochs(obsCnt).sow = obsSow;
+            virtualObsEpochs(obsCnt).RxPos = RxPosEcef(1,:);
+            virtualObsEpochs(obsCnt).sat = obsSat;
+            virtualObsEpochs(obsCnt).C1C = virtualC1C;
+            virtualObsEpochs(obsCnt).L1C = virtualL1C;
+            virtualObsEpochs(obsCnt).D1C = virtualD1C;
+            virtualObsEpochs(obsCnt).S1C = virtualS1C;
+
+        else
+            % Partial mode: build the ideal post-takeover scenario OBS from the
+            % already-computed Direct and full relay-Virtual observations.
+            partialC1C = directC1C;
+            partialL1C = directL1C;
+            partialD1C = directD1C;
+            partialS1C = directS1C;
+
+            partialSpoofActive = logical(settings.SpoofingEnable) && ...
+                (spoofingEnable(loopCnt) == 1);
+
+            if partialSpoofActive
+                spoofedIdx = logical(Indicator_sp(:));
+                partialC1C(spoofedIdx) = virtualC1C(spoofedIdx);
+                partialL1C(spoofedIdx) = virtualL1C(spoofedIdx);
+                partialD1C(spoofedIdx) = virtualD1C(spoofedIdx);
+                partialS1C(spoofedIdx) = virtualS1C(spoofedIdx);
+            end
+
+            partialSpoofObsEpochs(obsCnt).week = eph(1).weekNrm;
+            partialSpoofObsEpochs(obsCnt).sow = obsSow;
+            partialSpoofObsEpochs(obsCnt).RxPos = RxPosEcef(1,:);
+            partialSpoofObsEpochs(obsCnt).sat = obsSat;
+            partialSpoofObsEpochs(obsCnt).C1C = partialC1C;
+            partialSpoofObsEpochs(obsCnt).L1C = partialL1C;
+            partialSpoofObsEpochs(obsCnt).D1C = partialD1C;
+            partialSpoofObsEpochs(obsCnt).S1C = partialS1C;
+        end
     end
     
     % Update Rx time and receiver position --------------------------------
@@ -460,9 +522,16 @@ if obsEnable
     meta.rcvClockOffsAppl = 0;
 
     writeRinex302Obs_GPS_L1CA(settings.directObsFile,meta,directObsEpochs);
-    writeRinex302Obs_GPS_L1CA(settings.virtualObsFile,meta,virtualObsEpochs);
-    fprintf('RINEX OBS exported: %s and %s (epochs=%d)\n', ...
-        settings.directObsFile,settings.virtualObsFile,obsCnt);
+
+    if settings.SpoofingChannelMode == 1
+        writeRinex302Obs_GPS_L1CA(settings.virtualObsFile,meta,virtualObsEpochs);
+        fprintf('RINEX OBS exported: %s and %s (epochs=%d)\n', ...
+            settings.directObsFile,settings.virtualObsFile,obsCnt);
+    else
+        writeRinex302Obs_GPS_L1CA(settings.partialSpoofObsFile,meta,partialSpoofObsEpochs);
+        fprintf('RINEX OBS exported: %s and %s (epochs=%d)\n', ...
+            settings.directObsFile,settings.partialSpoofObsFile,obsCnt);
+    end
 end
 %% clear environment
 fclose(fid);

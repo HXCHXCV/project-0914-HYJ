@@ -24,6 +24,7 @@ settings.obsEnable          = 1;
 settings.obsInterval        = 1.0;       % 0.001 or 1.0 [s]
 settings.directObsFile      = 'Direct.obs';
 settings.virtualObsFile     = 'Virtual.obs';
+settings.partialSpoofObsFile = 'PartialSpoof.obs';
 
 settings.markerName         = 'SIM';
 settings.markerNumber       = '0000';
@@ -55,6 +56,10 @@ settings.powerIncreaseFactor  =  10;  %[0~10]  %欺骗功率大于直达xdBm
 
 %欺骗类型
 settings.SpoofingTypes = 1; %    1:地点欺骗   2:时间欺骗
+
+% Position-spoofing channel mode
+settings.SpoofingChannelMode = 1;          % 1-full channel, 2-partial channel
+settings.PartialSpoofingChannelCount = 4; % First N visible channels in partial mode
 
 %地点欺骗参数控制 轨迹  注意轨迹需要手动设置
 settings.SpoofingStart_Position = 26000;  %无欺骗时长[ms]，需要保证时间小于欺骗场景中的静止时间，最好必须超过6s，因为FGI-GSRx会舍弃第一子帧定位[ms] 

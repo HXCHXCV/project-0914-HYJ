@@ -28,3 +28,7 @@ helpsearch*/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local handoff and design notes
+/HANDOFF.md
+/PARTIAL_CHANNEL_OBS_DESIGN.md
